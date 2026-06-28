@@ -1,6 +1,22 @@
-# SofaControl
+# 🛋️ SofaControl: PC gaming, sofa style.
 
-Created by **HeroiAmarelo**.
+Transform your PC into a console experience. No complex setups—just plug and play. 🎮 Works with XINPUT controllers.
+
+## 🚀 Key Features
+
+* **Plug-and-Play:** Zero configuration required. Ready to go instantly. ✅
+* **Instant Toggle:** Switch between **Mouse Mode** and **Native Gamepad** (or emulated XBOX360) instantly with `LT + RT + B + Y`. 🔄
+* **Precision Mode:** Hold `RT` in Mouse Mode for surgical control—perfect for navigating desktop UI with ease. 🎯
+* **Total Control:** Manage your entire library, browser, and media from the couch. Close apps, use the on-screen keyboard, shutdown your PC with simple combos. 🕹️
+
+---
+
+## 📋 Command Map
+![Command List](command_list_installer.jpg)
+
+---
+
+*Support development by [buying me a coffee (5€)](https://paypal.me/heroiamarelo/5)! ☕*
 
 **Use your Xbox controller as a mouse + keyboard for your living-room PC - no
 keyboard or mouse needed on the couch.**
