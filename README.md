@@ -12,7 +12,7 @@ Transform your PC into a console experience. No complex setups—just plug and p
 ---
 
 ## 📋 Command Map
-![Command List](command_list_installer.jpg)
+![Commands List](https://raw.githubusercontent.com/heroiamarelo1/SofaControl/main/assets/command_list.png)
 
 ---
 
