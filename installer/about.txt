@@ -1,0 +1,38 @@
+SofaControl - Xbox controller as a couch remote for your PC
+============================================================
+
+SofaControl turns an Xbox controller into a full virtual mouse and keyboard,
+so you can run your living-room / home-theater PC from the sofa without ever
+reaching for a real keyboard or mouse.
+
+What it does
+------------
+  * Move the mouse, click, scroll and zoom with the controller.
+  * Pop up an on-screen keyboard to type, search and log in.
+  * Alt+Tab between apps, go back/forward in the browser.
+  * One combo flips into "game mode": your controller instantly works as a
+    real Xbox pad inside games and apps.
+  * Extra combos can close the current game, or put the PC to sleep / shut it
+    down - all from the controller.
+
+Perfect for couch gaming, streaming video, music and general media-center use.
+
+What gets installed
+-------------------
+To make all of this work, the setup also installs two small, open-source,
+signed drivers from Nefarius Software Solutions:
+
+  * ViGEmBus - lets SofaControl present a virtual Xbox 360 controller to games.
+  * HidHide  - hides your real controller from games so only SofaControl sees
+               it (no double inputs).
+
+If you already have either driver, the setup will simply skip it. A reboot may
+be requested after a first-time driver install.
+
+Open source
+-----------
+SofaControl is free and open source (MIT License). You can read the code,
+build it yourself, suggest changes, or just enjoy it. If it saves you a few
+trips to the keyboard, there is a "Buy me a coffee" button inside the app.
+
+Click Next to continue.
