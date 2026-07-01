@@ -41,6 +41,12 @@ add_executable(SofaControl WIN32
     src/WindowManager.cpp
 )
 
+add_executable(SofaControlGuard
+    src/GuardService.cpp
+    src/DeviceHider.cpp
+    src/HidHidePaths.cpp
+)
+
 target_link_libraries(SofaControl PRIVATE
     ViGEmClient::ViGEmClient
     xinput
@@ -57,11 +63,22 @@ target_link_libraries(SofaControl PRIVATE
     gdiplus
 )
 
+target_link_libraries(SofaControlGuard PRIVATE
+    xinput
+    setupapi
+    cfgmgr32
+    hid
+    advapi32
+    shell32
+)
+
 target_compile_definitions(SofaControl PRIVATE UNICODE _UNICODE)
+target_compile_definitions(SofaControlGuard PRIVATE UNICODE _UNICODE)
 
 if(MSVC)
     # /wd4828 silences UTF-8 byte warnings from the vendored ViGEmClient header.
     target_compile_options(SofaControl PRIVATE /utf-8 /wd4828)
+    target_compile_options(SofaControlGuard PRIVATE /utf-8)
 endif()
 
 # Copy toggle.wav into the output folder

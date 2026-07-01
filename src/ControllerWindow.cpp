@@ -211,6 +211,7 @@ bool ControllerWindow::Create(HINSTANCE instance) {
         return false;
     }
 
+    SetWindowTextW(hwnd_, L"SofaControl");
     EnableDarkTitleBar(hwnd_);
 
     // Start minimized to the tray instead of the taskbar.
@@ -347,6 +348,7 @@ LRESULT ControllerWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     case WM_DESTROY:
         KillTimer(hwnd, kTimerId);
         KillTimer(hwnd, kReminderTimerId);
+        CloseCommandList();
         RemoveTrayIcon();
         controllerShortcuts_.Reset();
         mouse_.ReleaseAll();
@@ -373,6 +375,7 @@ void ControllerWindow::OnCreate(HWND hwnd) {
     taskbarCreatedMsg_ = RegisterWindowMessageW(L"TaskbarCreated");
 
     config_.Load();
+    DeviceHider::SetBootGuardEnabled(false);
 
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
     Gdiplus::GdiplusStartup(&gdiplusToken_, &gdiplusStartupInput, nullptr);
@@ -385,7 +388,11 @@ void ControllerWindow::OnCreate(HWND hwnd) {
     CreateChildControls(hwnd);
     AddTrayIcon();
 
-    deviceHider_.Hide();
+    if (config_.PreArmEnabled()) {
+        deviceHider_.Hide();
+    } else {
+        deviceHider_.Reveal();
+    }
     virtualGamepad_.SetRumbleHandler([this](UCHAR largeMotor, UCHAR smallMotor) {
         const WORD left = static_cast<WORD>(largeMotor) << 8;
         const WORD right = static_cast<WORD>(smallMotor) << 8;
@@ -401,10 +408,6 @@ void ControllerWindow::OnCreate(HWND hwnd) {
         if (!config_.PreArmEnabled()) {
             return;
         }
-        if (config_.GetBackend() == ControllerBackend::Emulated360) {
-            return;
-        }
-
         preArmActive_ = true;
         preArmStartMs_ = GetTickCount64();
         preArmLastDisplayedSec_ = ULONGLONG(-1);
@@ -416,6 +419,13 @@ void ControllerWindow::OnCreate(HWND hwnd) {
     ApplyModeForCurrent();
     UpdatePreArmAvailability();
     UpdateStatusText();
+
+    if (config_.ShowOnNextLaunch()) {
+        config_.SetShowOnNextLaunch(false);
+        config_.Save();
+        ShowFromTray();
+    }
+
     SetTimer(hwnd, kTimerId, kPollMs, nullptr);
 
     InitDonationReminder();
@@ -556,28 +566,35 @@ void ControllerWindow::ApplyModeForCurrent() {
         preArmActive_ = false;
         aLastPressMs_ = 0;
 
-        if (config_.GetBackend() == ControllerBackend::Emulated360) {
-            // Real controller stays hidden; the game sees the ViGEm virtual pad.
-            deviceHider_.Hide();
-            virtualGamepad_.Connect();
-        } else {
+        if (config_.GetBackend() == ControllerBackend::Native) {
             // Native: expose the real controller directly to the game.
             virtualGamepad_.Disconnect();
             deviceHider_.Reveal();
+        } else {
+            if (config_.PreArmEnabled()) {
+                deviceHider_.Hide();
+            } else {
+                deviceHider_.Reveal();
+            }
+            virtualGamepad_.Connect();
         }
     } else {
         controllerShortcuts_.Reset();
         preArmActive_ = false;
         aLastPressMs_ = 0;
         searchOverlay_.Close();
-        if (config_.GetBackend() == ControllerBackend::Emulated360) {
+        if (config_.GetBackend() != ControllerBackend::Native) {
             if (virtualGamepad_.Connect()) {
                 virtualGamepad_.ClearInput();
             }
         } else {
             virtualGamepad_.Disconnect();
         }
-        deviceHider_.Hide();
+        if (config_.PreArmEnabled()) {
+            deviceHider_.Hide();
+        } else {
+            deviceHider_.Reveal();
+        }
         PrimeVirtualMouseCursor();
     }
 }
@@ -733,6 +750,10 @@ void ControllerWindow::OnTimer() {
     }
 
     if (!controller_.IsConnected()) {
+        if (commandListHeldOpen_) {
+            CloseCommandList();
+            commandListHeldOpen_ = false;
+        }
         if (virtualGamepad_.IsConnected()) {
             virtualGamepad_.Disconnect();
             UpdateStatusText();
@@ -744,10 +765,32 @@ void ControllerWindow::OnTimer() {
     // System combos work in every mode (so a game can be closed while playing).
     const bool systemComboEngaged = HandleSystemCombos();
 
-    // Passthrough (game) mode: nothing to drive for Native; mirror input for Emulated 360.
+    const bool commandListHeld =
+        controller_.IsButtonDown(XINPUT_GAMEPAD_BACK) &&
+        !controller_.IsLeftTriggerHeld() &&
+        !controller_.IsRightTriggerHeld();
+    if (commandListHeld) {
+        if (commandListHwnd_ && !IsWindow(commandListHwnd_)) {
+            commandListHwnd_ = nullptr;
+            commandListHeldOpen_ = false;
+        }
+        if (!commandListHeldOpen_) {
+            ShowCommandList();
+            commandListHeldOpen_ = true;
+        }
+        mouse_.ReleaseAll();
+        return;
+    }
+    if (commandListHeldOpen_) {
+        CloseCommandList();
+        commandListHeldOpen_ = false;
+    }
+
+    // Passthrough (game) mode: Native lets the game read the real controller;
+    // emulated mirrors through ViGEm instead.
     if (modeManager_.CurrentMode() == AppMode::Passthrough) {
         mouse_.ReleaseAll();
-        if (config_.GetBackend() == ControllerBackend::Emulated360) {
+        if (config_.GetBackend() != ControllerBackend::Native) {
             if (!virtualGamepad_.IsConnected()) {
                 virtualGamepad_.Connect();
                 UpdateStatusText();
@@ -774,8 +817,8 @@ void ControllerWindow::OnTimer() {
     // Tick the pre-arm countdown (reveal → wait for XInput toggle → hide if timeout).
     TickPreArm();
 
-    // Retry hiding if HidHide failed (only when not pre-armed, where reveal is intentional).
-    if (!preArmActive_) {
+    // Retry hiding only when pre-arm is enabled; otherwise the controller stays visible.
+    if (config_.PreArmEnabled() && !preArmActive_) {
         if (!deviceHider_.IsHiding()) {
             if (++hideRetryCounter_ >= kHideRetryFrames) {
                 hideRetryCounter_ = 0;
@@ -806,7 +849,9 @@ void ControllerWindow::OnTimer() {
         return;
     }
 
-    if (controller_.WasButtonJustPressed(XINPUT_GAMEPAD_Y) && searchOverlay_.IsOpen() && integratedKeyboard_.IsOpen()) {
+    if (!controller_.IsButtonDown(XINPUT_GAMEPAD_RIGHT_SHOULDER) &&
+        controller_.WasButtonJustPressed(XINPUT_GAMEPAD_Y) &&
+        searchOverlay_.IsOpen() && integratedKeyboard_.IsOpen()) {
         mouse_.ReleaseAll();
         integratedKeyboard_.Close();
         searchOverlay_.Close();
@@ -814,7 +859,8 @@ void ControllerWindow::OnTimer() {
         return;
     }
 
-    if (controller_.WasButtonJustPressed(XINPUT_GAMEPAD_Y) && !integratedKeyboard_.IsOpen()) {
+    if (!controller_.IsButtonDown(XINPUT_GAMEPAD_RIGHT_SHOULDER) &&
+        controller_.WasButtonJustPressed(XINPUT_GAMEPAD_Y) && !integratedKeyboard_.IsOpen()) {
         mouse_.ReleaseAll();
         const bool opened = searchOverlay_.Toggle();
         if (opened) {
@@ -824,7 +870,7 @@ void ControllerWindow::OnTimer() {
                 preArmLastDisplayedSec_ = ULONGLONG(-1);
             }
             aLastPressMs_ = 0;
-            if (!deviceHider_.IsHiding()) {
+            if (config_.PreArmEnabled() && !deviceHider_.IsHiding()) {
                 deviceHider_.Hide();
             }
             if (!integratedKeyboard_.IsOpen()) {
@@ -838,7 +884,8 @@ void ControllerWindow::OnTimer() {
         return;
     }
 
-    if (controller_.WasButtonJustPressed(XINPUT_GAMEPAD_X)) {
+    if (!controller_.IsButtonDown(XINPUT_GAMEPAD_RIGHT_SHOULDER) &&
+        controller_.WasButtonJustPressed(XINPUT_GAMEPAD_X)) {
         mouse_.ReleaseAll();
         const bool opened = searchOverlay_.IsOpen() && !integratedKeyboard_.IsOpen()
                                 ? integratedKeyboard_.OpenBelowWindow(
@@ -847,25 +894,38 @@ void ControllerWindow::OnTimer() {
                                       12)
                                 : integratedKeyboard_.Toggle();
         if (opened) {
-            // While the keyboard owns input, the controller must stay hidden from
-            // Windows so D-pad/buttons can't leak to the shell. Cancel any pre-arm
-            // reveal and re-assert the HidHide cloak.
+            // If pre-arm is enabled, keyboard input should keep the controller hidden.
             if (preArmActive_) {
                 preArmActive_ = false;
                 preArmLastDisplayedSec_ = ULONGLONG(-1);
             }
             aLastPressMs_ = 0;
-            if (!deviceHider_.IsHiding()) {
+            if (config_.PreArmEnabled() && !deviceHider_.IsHiding()) {
                 deviceHider_.Hide();
             }
         }
         UpdateStatusText();
     }
 
+    if (searchOverlay_.IsOpen() && integratedKeyboard_.IsOpen() &&
+        controller_.WasButtonJustPressed(XINPUT_GAMEPAD_START)) {
+        mouse_.ReleaseAll();
+        integratedKeyboard_.Close();
+
+        SearchOverlayInput searchInput{};
+        searchInput.open = true;
+        searchOverlay_.Update(searchInput);
+
+        UpdateStatusText();
+        return;
+    }
+
     if (integratedKeyboard_.IsOpen()) {
         ControllerKeyboardInput keyboardInput{};
         keyboardInput.stickX = controller_.LeftStickX();
         keyboardInput.stickY = controller_.LeftStickY();
+        keyboardInput.rightStickX = controller_.RightStickX();
+        keyboardInput.rightStickY = controller_.RightStickY();
         keyboardInput.navUp = controller_.WasButtonJustPressed(XINPUT_GAMEPAD_DPAD_UP);
         keyboardInput.navDown = controller_.WasButtonJustPressed(XINPUT_GAMEPAD_DPAD_DOWN);
         keyboardInput.navLeft = controller_.WasButtonJustPressed(XINPUT_GAMEPAD_DPAD_LEFT);
@@ -894,6 +954,18 @@ void ControllerWindow::OnTimer() {
         return;
     }
 
+    if (controllerShortcuts_.UpdateMediaControls(controller_)) {
+        mouse_.ReleaseAll();
+        if (controller_.IsButtonDown(XINPUT_GAMEPAD_A)) {
+            suppressMouseUntilARelease_ = true;
+        }
+        if (controller_.IsButtonDown(XINPUT_GAMEPAD_B)) {
+            suppressMouseUntilBRelease_ = true;
+        }
+        UpdateStatusText();
+        return;
+    }
+
     // Detect double-tap A to pre-arm (must be after keyboard/alttab guards).
     CheckPreArmDoubleTap();
 
@@ -916,10 +988,6 @@ void ControllerWindow::OnTimer() {
 
 void ControllerWindow::CheckPreArmDoubleTap() {
     if (!config_.PreArmEnabled()) return;
-    // Pre-arm reveals the *native* controller for a game to detect it. In the
-    // Emulated 360 backend the game sees the virtual ViGEm pad instead, so
-    // pre-arm makes no sense and must never reveal the real controller.
-    if (config_.GetBackend() == ControllerBackend::Emulated360) return;
     if (preArmActive_) return;
     if (suppressMouseUntilARelease_) return;
     if (!controller_.WasButtonJustPressed(XINPUT_GAMEPAD_A)) return;
@@ -1075,8 +1143,10 @@ void ControllerWindow::OnSelectActionChanged() {
 
 void ControllerWindow::OnBackendChanged() {
     const int sel = static_cast<int>(SendMessageW(hwndBackendCombo_, CB_GETCURSEL, 0, 0));
-    config_.SetBackend(sel == 1 ? ControllerBackend::Emulated360 : ControllerBackend::Native);
+    config_.SetBackend(sel == 1 ? ControllerBackend::Emulated360
+                                : ControllerBackend::Native);
     config_.Save();
+    DeviceHider::SetBootGuardEnabled(false);
 
     // Re-apply so the change takes effect immediately if already in game mode.
     ApplyModeForCurrent();
@@ -1086,17 +1156,7 @@ void ControllerWindow::OnBackendChanged() {
 }
 
 void ControllerWindow::UpdatePreArmAvailability() {
-    const bool emulated = config_.GetBackend() == ControllerBackend::Emulated360;
-    EnableWindow(hwndPreArmCheck_, emulated ? FALSE : TRUE);
-
-    // Switching to Emulated 360 must cancel any active pre-arm reveal.
-    if (emulated && preArmActive_) {
-        preArmActive_ = false;
-        preArmLastDisplayedSec_ = ULONGLONG(-1);
-        if (modeManager_.CurrentMode() == AppMode::VirtualMouse) {
-            deviceHider_.Hide();
-        }
-    }
+    EnableWindow(hwndPreArmCheck_, TRUE);
     InvalidateRect(hwndPreArmCheck_, nullptr, FALSE);
 }
 
@@ -1108,11 +1168,17 @@ void ControllerWindow::OnPreArmToggled() {
     if (!preArmChecked_ && preArmActive_) {
         preArmActive_ = false;
         preArmLastDisplayedSec_ = ULONGLONG(-1);
-        if (modeManager_.CurrentMode() == AppMode::VirtualMouse) {
-            deviceHider_.Hide();
-        }
+        deviceHider_.Reveal();
         UpdateStatusText();
         InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+    if (modeManager_.CurrentMode() == AppMode::VirtualMouse) {
+        if (preArmChecked_) {
+            deviceHider_.Hide();
+        } else {
+            deviceHider_.Reveal();
+        }
+        UpdateStatusText();
     }
 }
 
@@ -1176,6 +1242,21 @@ void ControllerWindow::ShowDonationBalloon() {
 void ControllerWindow::OnWakeCheckToggled() {
     const bool desired = !wakeChecked_;
 
+    if (desired) {
+        const int wakeConfirm = MessageBoxW(
+            hwnd_,
+            L"SofaControl will try to let your Xbox controller wake this PC from sleep.\n\n"
+            L"It will enable wake on matching wake-capable Xbox/controller devices, disable USB selective suspend for the current power plan, and save a text log so these changes can be reverted later.\n\n"
+            L"This may require BIOS/UEFI USB wake settings that SofaControl cannot change. It does not work on every PC and depends on your motherboard, USB controller, sleep state, and controller hardware.\n\n"
+            L"Apply these wake changes?",
+            L"Controller wake",
+            MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+        if (wakeConfirm != IDYES) {
+            InvalidateRect(hwndWakeCheck_, nullptr, FALSE);
+            return;
+        }
+    }
+
     std::wstring status;
     const bool ok = SystemActions::SetControllerWake(desired, AppConfig::AppDataDir(), status);
     if (ok) {
@@ -1186,6 +1267,26 @@ void ControllerWindow::OnWakeCheckToggled() {
     InvalidateRect(hwndWakeCheck_, nullptr, FALSE);
 
     MessageBoxW(hwnd_, status.c_str(), L"Controller wake", ok ? MB_ICONINFORMATION : MB_ICONWARNING);
+
+    if (ok && desired) {
+        const int signInConfirm = MessageBoxW(
+            hwnd_,
+            L"Optional sign-in change:\n\n"
+            L"SofaControl can try to make Windows return directly to the desktop after waking from sleep by disabling the wake sign-in requirement for the current power plan and disabling the lock screen policy.\n\n"
+            L"This weakens security: someone with physical access may reach your desktop after wake. The changes will be logged to a text file and can be reverted by turning this option off again.\n\n"
+            L"Cold boot auto-login may still require manual Windows account settings; SofaControl will not store your Windows password in the registry.\n\n"
+            L"Apply these sign-in changes?",
+            L"Wake sign-in",
+            MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+        if (signInConfirm == IDYES) {
+            std::wstring signInStatus;
+            const bool signInOk = SystemActions::SetWakeSignInBypass(true, AppConfig::AppDataDir(), signInStatus);
+            MessageBoxW(hwnd_, signInStatus.c_str(), L"Wake sign-in", signInOk ? MB_ICONINFORMATION : MB_ICONWARNING);
+        }
+    } else if (ok && !desired) {
+        std::wstring signInStatus;
+        SystemActions::SetWakeSignInBypass(false, AppConfig::AppDataDir(), signInStatus);
+    }
 }
 
 void ControllerWindow::OnStartupCheckToggled() {
@@ -1334,6 +1435,13 @@ void ControllerWindow::ShowTrayMenu() {
 }
 
 void ControllerWindow::ShowCommandList() {
+    if (commandListHwnd_ && IsWindow(commandListHwnd_)) {
+        ShowWindow(commandListHwnd_, SW_SHOW);
+        SetForegroundWindow(commandListHwnd_);
+        return;
+    }
+    commandListHwnd_ = nullptr;
+
     const std::wstring imgPath = AssetPath(L"assets\\command_list.png");
 
     // Load the infographic; fall back to a short text box if it's missing.
@@ -1388,9 +1496,17 @@ void ControllerWindow::ShowCommandList() {
         delete image;
         return;
     }
+    commandListHwnd_ = popup;
     EnableDarkTitleBar(popup);
     ShowWindow(popup, SW_SHOW);
     UpdateWindow(popup);
+}
+
+void ControllerWindow::CloseCommandList() {
+    if (commandListHwnd_ && IsWindow(commandListHwnd_)) {
+        DestroyWindow(commandListHwnd_);
+    }
+    commandListHwnd_ = nullptr;
 }
 
 void ControllerWindow::UpdateSensitivityLabel() {
@@ -1423,7 +1539,7 @@ std::wstring ControllerWindow::DriverStatusLine() const {
     }
 
     if (modeManager_.CurrentMode() == AppMode::Passthrough) {
-        if (config_.GetBackend() == ControllerBackend::Emulated360) {
+        if (config_.GetBackend() != ControllerBackend::Native) {
             line += L"\r\n";
             line += virtualGamepad_.StatusMessage();
         }
@@ -1442,9 +1558,13 @@ std::wstring ControllerWindow::ModeLabel() const {
     case AppMode::VirtualMouse:
         return preArmActive_ ? L"Virtual Mouse — pre-arm active" : L"Virtual Mouse";
     case AppMode::Passthrough:
-        return config_.GetBackend() == ControllerBackend::Emulated360
-                   ? L"Game mode — Emulated Xbox 360"
-                   : L"Game mode — Native Xbox controller";
+        switch (config_.GetBackend()) {
+        case ControllerBackend::Native:
+            return L"Game mode - Native Xbox controller";
+        case ControllerBackend::Emulated360:
+            return L"Game mode - Emulated Xbox 360";
+        }
+        break;
     }
     return L"Unknown";
 }
@@ -1475,12 +1595,14 @@ void ControllerWindow::DrawDarkUi(HDC hdc, const RECT& client) const {
 
     SelectObject(hdc, uiFont_);
     DrawTextAt(hdc, textLeft, banner.top + 56,
-        L"LT+RT+B+Y: switch mode  \x2022  see Command list for everything", kColDim);
+        L"LT+RT+B+Y: switch mode  \x2022  Hold Share/Select for commands", kColDim);
 
     // Mode badge (top-right).
     const wchar_t* badge = virtualMode
         ? (preArmActive_ ? L"MOUSE (PRE-ARM)" : L"VIRTUAL MOUSE")
-        : (config_.GetBackend() == ControllerBackend::Emulated360 ? L"GAME: EMU 360" : L"GAME: NATIVE");
+        : (config_.GetBackend() == ControllerBackend::Native
+               ? L"GAME: NATIVE"
+               : L"GAME: EMU 360");
     const COLORREF badgeColor = virtualMode ? kColGreen : kColBlue;
     RECT badgeRect{ banner.right - 184, banner.top + 24, banner.right - 20, banner.top + 60 };
     FillRoundRect(hdc, badgeRect, 12, badgeColor, badgeColor);
@@ -1548,13 +1670,10 @@ void ControllerWindow::OnDrawItem(const DRAWITEMSTRUCT* dis) const {
             // Background blends with the card behind it.
             FillRect(dc, &rc, cardBrush_);
 
-            // Pre-arm is unavailable in the Emulated 360 backend: show it
-            // greyed-out and unchecked, and ignore clicks (window disabled).
-            const bool dim = (id == kPreArmCheckId) &&
-                             (config_.GetBackend() == ControllerBackend::Emulated360);
+            const bool dim = false;
 
             bool checked = false;
-            if (id == kPreArmCheckId)  checked = preArmChecked_ && !dim;
+            if (id == kPreArmCheckId)  checked = preArmChecked_;
             if (id == kCombosCheckId)  checked = combosChecked_;
             if (id == kWakeCheckId)    checked = wakeChecked_;
             if (id == kStartupCheckId) checked = startupChecked_;

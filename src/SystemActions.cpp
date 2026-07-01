@@ -253,14 +253,19 @@ bool SetRunAtStartup(bool enable) {
             L"$trigger=New-ScheduledTaskTrigger -AtLogOn\r\n"
             L"$user=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name\r\n"
             L"$principal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest\r\n"
-            L"Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Description 'Start SofaControl elevated at logon.' -Force | Out-Null\r\n";
+            L"$settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -Priority 0\r\n"
+            L"Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Start SofaControl elevated at logon with high priority.' -Force | Out-Null\r\n"
+            L"New-Item -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Force | Out-Null\r\n"
+            L"Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'SofaControl' -Value ('\"' + $exe + '\"')\r\n";
     } else {
         script +=
             L"Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue\r\n";
     }
 
-    script +=
-        L"Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'SofaControl' -ErrorAction SilentlyContinue\r\n";
+    if (!enable) {
+        script +=
+            L"Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'SofaControl' -ErrorAction SilentlyContinue\r\n";
+    }
 
     if (!WriteUtf8File(scriptPath, script)) {
         return false;
@@ -268,7 +273,6 @@ bool SetRunAtStartup(bool enable) {
 
     DWORD exitCode = 1;
     const bool launched = RunElevatedScript(scriptPath, exitCode);
-    RemoveLegacyRunValue();
     return launched && exitCode == 0;
 }
 
@@ -279,6 +283,7 @@ bool SetControllerWake(bool enable, const std::wstring& appDataDir, std::wstring
     }
 
     const std::wstring armedList = (std::filesystem::path(appDataDir) / L"wake_armed.txt").wstring();
+    const std::wstring changeLog = (std::filesystem::path(appDataDir) / L"wake_changes_log.txt").wstring();
     const std::wstring scriptPath =
         (std::filesystem::path(appDataDir) / (enable ? L"wake_enable.ps1" : L"wake_disable.ps1")).wstring();
 
@@ -288,11 +293,15 @@ bool SetControllerWake(bool enable, const std::wstring& appDataDir, std::wstring
         script =
             L"$ErrorActionPreference='SilentlyContinue'\r\n"
             L"$armed='" + armedList + L"'\r\n"
+            L"$log='" + changeLog + L"'\r\n"
+            L"Add-Content -Encoding Unicode -Path $log -Value ('[' + (Get-Date) + '] Enable controller wake')\r\n"
             L"$programmable = powercfg /devicequery wake_programmable\r\n"
             L"$any = powercfg /devicequery wake_from_any\r\n"
             L"$devs = @($programmable + $any) | Where-Object { $_ } | Sort-Object -Unique\r\n"
-            L"$match = $devs | Where-Object { $_ -match 'Xbox' -or $_ -match 'XINPUT' -or $_ -match 'Controller' -or $_ -match 'Wireless' }\r\n"
-            L"foreach ($d in $match) { powercfg /deviceenablewake \"$d\" }\r\n"
+            L"$match = $devs | Where-Object { $_ -match 'Xbox' -or $_ -match 'XINPUT' -or $_ -match 'XUSB' -or $_ -match 'Microsoft.*Controller' -or $_ -match 'Controller.*Xbox' }\r\n"
+            L"if (-not $match -or $match.Count -eq 0) { Add-Content -Encoding Unicode -Path $log -Value 'No matching wake-capable Xbox/controller devices found.'; exit 2 }\r\n"
+            L"foreach ($d in $match) { Add-Content -Encoding Unicode -Path $log -Value ('Enable wake: ' + $d); powercfg /deviceenablewake \"$d\" | Out-Null }\r\n"
+            L"Add-Content -Encoding Unicode -Path $log -Value 'Disable USB selective suspend for current power plan (AC/DC): USBSELECTIVE=0'\r\n"
             L"powercfg /setacvalueindex SCHEME_CURRENT SUB_USB USBSELECTIVE 0 | Out-Null\r\n"
             L"powercfg /setdcvalueindex SCHEME_CURRENT SUB_USB USBSELECTIVE 0 | Out-Null\r\n"
             L"powercfg /setactive SCHEME_CURRENT | Out-Null\r\n"
@@ -301,8 +310,10 @@ bool SetControllerWake(bool enable, const std::wstring& appDataDir, std::wstring
         script =
             L"$ErrorActionPreference='SilentlyContinue'\r\n"
             L"$armed='" + armedList + L"'\r\n"
+            L"$log='" + changeLog + L"'\r\n"
+            L"Add-Content -Encoding Unicode -Path $log -Value ('[' + (Get-Date) + '] Disable controller wake')\r\n"
             L"if (Test-Path $armed) {\r\n"
-            L"  Get-Content $armed | ForEach-Object { if ($_ -and $_.Trim()) { powercfg /devicedisablewake \"$_\" } }\r\n"
+            L"  Get-Content $armed | ForEach-Object { if ($_ -and $_.Trim()) { Add-Content -Encoding Unicode -Path $log -Value ('Disable wake: ' + $_); powercfg /devicedisablewake \"$_\" | Out-Null } }\r\n"
             L"  Remove-Item $armed -Force\r\n"
             L"}\r\n";
     }
@@ -318,8 +329,79 @@ bool SetControllerWake(bool enable, const std::wstring& appDataDir, std::wstring
         return false;
     }
 
-    statusOut = enable ? L"Wake: enabled for supported sleep states (firmware/device support required)."
+    if (enable && exitCode == 2) {
+        statusOut = L"Wake: no matching wake-capable Xbox/controller devices were found.";
+        return false;
+    }
+    if (exitCode != 0) {
+        statusOut = L"Wake: helper script failed.";
+        return false;
+    }
+
+    statusOut = enable ? L"Wake: enabled for matching supported devices (firmware/device support required)."
                        : L"Wake: controller wake disabled.";
+    return true;
+}
+
+bool SetWakeSignInBypass(bool enable, const std::wstring& appDataDir, std::wstring& statusOut) {
+    if (appDataDir.empty()) {
+        statusOut = L"Sign-in: could not resolve config folder.";
+        return false;
+    }
+
+    const std::wstring logPath = (std::filesystem::path(appDataDir) / L"wake_signin_changes.txt").wstring();
+    const std::wstring scriptPath =
+        (std::filesystem::path(appDataDir) / (enable ? L"wake_signin_enable.ps1" : L"wake_signin_disable.ps1")).wstring();
+
+    std::wstring script =
+        L"$ErrorActionPreference='SilentlyContinue'\r\n"
+        L"$log='" + logPath + L"'\r\n"
+        L"Add-Content -Encoding Unicode -Path $log -Value ('[' + (Get-Date) + '] " +
+        (enable ? L"Enable wake sign-in bypass" : L"Revert wake sign-in bypass") + L"')\r\n"
+        L"$q = powercfg /q SCHEME_CURRENT SUB_NONE CONSOLELOCK\r\n"
+        L"$ac = ($q | Select-String 'Current AC Power Setting Index').ToString()\r\n"
+        L"$dc = ($q | Select-String 'Current DC Power Setting Index').ToString()\r\n"
+        L"Add-Content -Encoding Unicode -Path $log -Value ('Previous CONSOLELOCK AC: ' + $ac)\r\n"
+        L"Add-Content -Encoding Unicode -Path $log -Value ('Previous CONSOLELOCK DC: ' + $dc)\r\n";
+
+    if (enable) {
+        script +=
+            L"powercfg /setacvalueindex SCHEME_CURRENT SUB_NONE CONSOLELOCK 0 | Out-Null\r\n"
+            L"powercfg /setdcvalueindex SCHEME_CURRENT SUB_NONE CONSOLELOCK 0 | Out-Null\r\n"
+            L"powercfg /setactive SCHEME_CURRENT | Out-Null\r\n"
+            L"$personalization='HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization'\r\n"
+            L"if (Test-Path $personalization) { $old=(Get-ItemProperty -Path $personalization -Name NoLockScreen -ErrorAction SilentlyContinue).NoLockScreen; Add-Content -Encoding Unicode -Path $log -Value ('Previous NoLockScreen: ' + $old) } else { Add-Content -Encoding Unicode -Path $log -Value 'Previous NoLockScreen: key missing' }\r\n"
+            L"New-Item -Path $personalization -Force | Out-Null\r\n"
+            L"New-ItemProperty -Path $personalization -Name NoLockScreen -Value 1 -PropertyType DWord -Force | Out-Null\r\n"
+            L"$passwordless='HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\PasswordLess\\Device'\r\n"
+            L"if (Test-Path $passwordless) { $old=(Get-ItemProperty -Path $passwordless -Name DevicePasswordLessBuildVersion -ErrorAction SilentlyContinue).DevicePasswordLessBuildVersion; Add-Content -Encoding Unicode -Path $log -Value ('Previous DevicePasswordLessBuildVersion: ' + $old); New-ItemProperty -Path $passwordless -Name DevicePasswordLessBuildVersion -Value 0 -PropertyType DWord -Force | Out-Null }\r\n";
+    } else {
+        script +=
+            L"powercfg /setacvalueindex SCHEME_CURRENT SUB_NONE CONSOLELOCK 1 | Out-Null\r\n"
+            L"powercfg /setdcvalueindex SCHEME_CURRENT SUB_NONE CONSOLELOCK 1 | Out-Null\r\n"
+            L"powercfg /setactive SCHEME_CURRENT | Out-Null\r\n"
+            L"$personalization='HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization'\r\n"
+            L"Remove-ItemProperty -Path $personalization -Name NoLockScreen -ErrorAction SilentlyContinue\r\n";
+    }
+
+    if (!WriteUtf8File(scriptPath, script)) {
+        statusOut = L"Sign-in: failed to write helper script.";
+        return false;
+    }
+
+    DWORD exitCode = 0;
+    if (!RunElevatedScript(scriptPath, exitCode)) {
+        statusOut = L"Sign-in: elevation cancelled or failed.";
+        return false;
+    }
+    if (exitCode != 0) {
+        statusOut = L"Sign-in: helper script failed.";
+        return false;
+    }
+
+    statusOut = enable
+        ? L"Sign-in: wake sign-in requirement changes applied. Full cold-boot auto-login may still need manual Windows account settings."
+        : L"Sign-in: wake sign-in changes reverted to Windows defaults.";
     return true;
 }
 

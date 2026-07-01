@@ -5,6 +5,7 @@
 // XInput mode: controller visible natively so games read real hardware.
 
 #include <string>
+#include <filesystem>
 #include <vector>
 
 class DeviceHider {
@@ -19,6 +20,17 @@ public:
 
     // Re-hide with freshly discovered device paths (e.g. controller reconnected).
     bool RefreshHidden();
+
+    // Used by the boot guard service: apply remembered HidHide protection early
+    // and whitelist extra executables such as SofaControl.exe.
+    bool ProtectKnownControllers(const std::vector<std::filesystem::path>& extraWhitelistExecutables);
+
+    static bool IsBootGuardEnabled();
+    static void SetBootGuardEnabled(bool enabled);
+    static std::wstring DiagnosticsSignature();
+    static void WriteDiagnosticsSnapshot(
+        const std::wstring& reason,
+        const std::filesystem::path& nonWhitelistedXInputProbe = {});
 
     const std::wstring& StatusMessage() const { return statusMessage_; }
 

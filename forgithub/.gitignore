@@ -1,0 +1,17 @@
+# Pastas de compilação
+build/
+out/
+.vs/
+x64/
+Debug/
+Release/
+cmake-build-*/
+
+# Ficheiros gerados pelo Visual Studio / CMake
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+CMakeCache.txt
+CMakeFiles/

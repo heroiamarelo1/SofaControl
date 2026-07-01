@@ -27,5 +27,6 @@ bool SetRunAtStartup(bool enable);
 // Uses an elevated powercfg helper (UAC prompt). Armed device names are stored
 // under appDataDir so they can be disarmed later. Returns true on success.
 bool SetControllerWake(bool enable, const std::wstring& appDataDir, std::wstring& statusOut);
+bool SetWakeSignInBypass(bool enable, const std::wstring& appDataDir, std::wstring& statusOut);
 
 }  // namespace SystemActions

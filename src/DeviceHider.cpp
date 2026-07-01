@@ -11,6 +11,8 @@
 #include <XInput.h>
 
 #include <filesystem>
+#include <fstream>
+#include <cwctype>
 #include <map>
 #include <set>
 
@@ -22,6 +24,8 @@
 namespace {
 
 using StringList = std::vector<std::wstring>;
+
+bool IsUnsafeGenericInstanceId(const std::wstring& id);
 
 std::filesystem::path AppDataDir() {
     wchar_t buffer[MAX_PATH]{};
@@ -44,6 +48,30 @@ std::filesystem::path ConfigPath() {
     return dir / L"config.ini";
 }
 
+std::filesystem::path ProgramDataDir() {
+    wchar_t buffer[MAX_PATH]{};
+    DWORD len = GetEnvironmentVariableW(L"ProgramData", buffer, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        len = GetEnvironmentVariableW(L"ALLUSERSPROFILE", buffer, MAX_PATH);
+    }
+    if (len == 0 || len >= MAX_PATH) {
+        return {};
+    }
+
+    std::filesystem::path dir = std::filesystem::path(buffer) / L"SofaControl";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+std::filesystem::path GuardConfigPath() {
+    const std::filesystem::path dir = ProgramDataDir();
+    if (dir.empty()) {
+        return {};
+    }
+    return dir / L"guard.ini";
+}
+
 bool RememberControllerPathsEnabled() {
     const std::filesystem::path path = ConfigPath();
     if (path.empty()) {
@@ -52,35 +80,70 @@ bool RememberControllerPathsEnabled() {
     return GetPrivateProfileIntW(L"SofaControl", L"RememberControllerPaths", 1, path.c_str()) != 0;
 }
 
+bool BootGuardEnabled() {
+    const std::filesystem::path path = GuardConfigPath();
+    if (path.empty()) {
+        return false;
+    }
+    return GetPrivateProfileIntW(L"SofaControl", L"BootGuardEnabled", 0, path.c_str()) != 0;
+}
+
+void WriteBootGuardEnabled(bool enabled) {
+    const std::filesystem::path path = GuardConfigPath();
+    if (path.empty()) {
+        return;
+    }
+    WritePrivateProfileStringW(
+        L"SofaControl",
+        L"BootGuardEnabled",
+        enabled ? L"1" : L"0",
+        path.c_str());
+}
+
 bool PrimaryXInputControllerConnected() {
     XINPUT_STATE state{};
     return XInputGetState(0, &state) == ERROR_SUCCESS;
 }
 
-StringList LoadRememberedControllerPaths() {
-    const std::filesystem::path path = ConfigPath();
-    if (path.empty() || !RememberControllerPathsEnabled()) {
-        return {};
+void LoadRememberedControllerPathsFromFile(const std::filesystem::path& path, StringList& paths) {
+    if (path.empty()) {
+        return;
     }
 
     const int count = GetPrivateProfileIntW(L"RememberedControllerPaths", L"Count", 0, path.c_str());
-    StringList paths;
     for (int i = 0; i < count && i < 128; ++i) {
         wchar_t key[32]{};
         swprintf_s(key, L"Path%d", i);
 
         wchar_t value[1024]{};
         GetPrivateProfileStringW(L"RememberedControllerPaths", key, L"", value, 1024, path.c_str());
-        if (value[0] != L'\0') {
+        if (value[0] != L'\0' && !IsUnsafeGenericInstanceId(value)) {
             paths.emplace_back(value);
         }
     }
-    return paths;
 }
 
-void SaveRememberedControllerPaths(const StringList& paths) {
-    const std::filesystem::path path = ConfigPath();
-    if (path.empty() || !RememberControllerPathsEnabled() || paths.empty()) {
+void SaveRememberedControllerPathsToFile(const std::filesystem::path& path, const StringList& paths);
+
+StringList LoadRememberedControllerPaths() {
+    if (!RememberControllerPathsEnabled()) {
+        return {};
+    }
+
+    StringList paths;
+    LoadRememberedControllerPathsFromFile(ConfigPath(), paths);
+    LoadRememberedControllerPathsFromFile(GuardConfigPath(), paths);
+
+    std::set<std::wstring> unique(paths.begin(), paths.end());
+    StringList merged(unique.begin(), unique.end());
+    if (!merged.empty()) {
+        SaveRememberedControllerPathsToFile(GuardConfigPath(), merged);
+    }
+    return merged;
+}
+
+void SaveRememberedControllerPathsToFile(const std::filesystem::path& path, const StringList& paths) {
+    if (path.empty() || paths.empty()) {
         return;
     }
 
@@ -97,6 +160,15 @@ void SaveRememberedControllerPaths(const StringList& paths) {
         swprintf_s(key, L"Path%d", index++);
         WritePrivateProfileStringW(L"RememberedControllerPaths", key, controllerPath.c_str(), path.c_str());
     }
+}
+
+void SaveRememberedControllerPaths(const StringList& paths) {
+    if (!RememberControllerPathsEnabled() || paths.empty()) {
+        return;
+    }
+
+    SaveRememberedControllerPathsToFile(ConfigPath(), paths);
+    SaveRememberedControllerPathsToFile(GuardConfigPath(), paths);
 }
 
 StringList MergeStringLists(const StringList& first, const StringList& second) {
@@ -168,6 +240,13 @@ bool AreAnyPathsPresent(const StringList& paths) {
     return false;
 }
 
+std::wstring UpperCopy(std::wstring value) {
+    for (auto& ch : value) {
+        ch = static_cast<wchar_t>(std::towupper(ch));
+    }
+    return value;
+}
+
 bool IsGamingHidUsage(USHORT usagePage, USHORT usage) {
     if (usagePage == 0x05) {
         return true;
@@ -179,8 +258,32 @@ bool IsMicrosoftControllerInstanceId(const std::wstring& id) {
     return id.find(L"VID_045E") != std::wstring::npos;
 }
 
+bool IsXboxWirelessReceiverInstanceId(const std::wstring& id) {
+    const std::wstring upper = UpperCopy(id);
+    return upper.rfind(L"USB\\VID_045E&PID_02E6\\", 0) == 0;
+}
+
 bool IsMicrosoftUsbInstanceId(const std::wstring& id) {
     return id.rfind(L"USB\\", 0) == 0 && IsMicrosoftControllerInstanceId(id);
+}
+
+bool IsXInputInterfaceId(const std::wstring& id) {
+    return id.find(L"IG_") != std::wstring::npos;
+}
+
+bool IsXusbInstanceId(const std::wstring& id) {
+    return id.rfind(L"XUSB\\", 0) == 0;
+}
+
+bool IsControllerRelevantInstanceId(const std::wstring& id) {
+    return IsMicrosoftControllerInstanceId(id) || IsXusbInstanceId(id) || IsXInputInterfaceId(id);
+}
+
+bool IsUnsafeGenericInstanceId(const std::wstring& id) {
+    return id.rfind(L"ACPI\\", 0) == 0 ||
+           id.rfind(L"ACPI_HAL\\", 0) == 0 ||
+           id.rfind(L"PCI\\", 0) == 0 ||
+           id.rfind(L"USB\\ROOT_HUB", 0) == 0;
 }
 
 void AddParentInstancePaths(std::set<std::wstring>& paths, const std::wstring& instanceId) {
@@ -206,7 +309,9 @@ void AddParentInstancePaths(std::set<std::wstring>& paths, const std::wstring& i
         if (parentId.empty() || parentId.rfind(L"ROOT\\", 0) == 0) {
             break;
         }
-        paths.insert(parentId);
+        if (IsControllerRelevantInstanceId(parentId) && !IsUnsafeGenericInstanceId(parentId)) {
+            paths.insert(parentId);
+        }
     }
 }
 
@@ -357,14 +462,7 @@ std::set<std::wstring> CollectControllerInstancePaths() {
             continue;
         }
 
-        const bool isMicrosoft = IsMicrosoftControllerInstanceId(id);
-        const bool isXusb = id.rfind(L"XUSB\\", 0) == 0;
-        const bool isUsb = IsMicrosoftUsbInstanceId(id);
-        // XInput-class interface marker; covers the node the Windows shell reads
-        // for gamepad navigation even when the HID collection is already hidden.
-        const bool isXInputIface = id.find(L"IG_") != std::wstring::npos;
-
-        if (isMicrosoft || isXusb || isUsb || isXInputIface) {
+        if (IsControllerRelevantInstanceId(id)) {
             AddControllerGroupCandidate(groups, id);
         }
     }
@@ -377,7 +475,36 @@ std::set<std::wstring> CollectControllerInstancePaths() {
         return {};
     }
 
-    return groups.begin()->second;
+    std::set<std::wstring> merged;
+    for (const auto& [key, group] : groups) {
+        for (const auto& path : group) {
+            if (!IsUnsafeGenericInstanceId(path)) {
+                merged.insert(path);
+            }
+        }
+    }
+    return merged;
+}
+
+std::set<std::wstring> CollectXboxWirelessReceiverPaths() {
+    std::set<std::wstring> receivers;
+    const StringList presentIds = EnumeratePresentDeviceInstanceIds();
+    for (const auto& id : presentIds) {
+        if (IsXboxWirelessReceiverInstanceId(id) && IsDevicePresent(id) && !IsUnsafeGenericInstanceId(id)) {
+            receivers.insert(id);
+        }
+    }
+    return receivers;
+}
+
+StringList FilterXboxWirelessReceiverPaths(const StringList& paths) {
+    StringList receivers;
+    for (const auto& path : paths) {
+        if (IsXboxWirelessReceiverInstanceId(path)) {
+            receivers.push_back(path);
+        }
+    }
+    return receivers;
 }
 
 class HidHideClient {
@@ -449,9 +576,7 @@ public:
         return false;
     }
 
-    bool EnsureCurrentProcessWhitelisted() {
-        const std::filesystem::path exePath = CurrentExecutablePath();
-
+    bool EnsureExecutableWhitelisted(const std::filesystem::path& exePath) {
         StringList whitelist;
         if (!GetMultiString(IOCTL_HIDHIDE_GET_WHITELIST, whitelist)) {
             return false;
@@ -482,6 +607,10 @@ public:
         return IsExecutableWhitelisted(refreshed, exePath);
     }
 
+    bool EnsureCurrentProcessWhitelisted() {
+        return EnsureExecutableWhitelisted(CurrentExecutablePath());
+    }
+
     bool MergeBlacklist(const StringList& addPaths, const StringList& removePaths) {
         StringList blacklist;
         if (!GetMultiString(IOCTL_HIDHIDE_GET_BLACKLIST, blacklist)) {
@@ -493,10 +622,27 @@ public:
             merged.erase(path);
         }
         for (const auto& path : addPaths) {
-            merged.insert(path);
+            if (!IsUnsafeGenericInstanceId(path)) {
+                merged.insert(path);
+            }
+        }
+        for (auto it = merged.begin(); it != merged.end();) {
+            if (IsUnsafeGenericInstanceId(*it)) {
+                it = merged.erase(it);
+            } else {
+                ++it;
+            }
         }
 
         return SetMultiString(IOCTL_HIDHIDE_SET_BLACKLIST, StringList(merged.begin(), merged.end()));
+    }
+
+    bool GetBlacklist(StringList& out) {
+        return GetMultiString(IOCTL_HIDHIDE_GET_BLACKLIST, out);
+    }
+
+    bool GetWhitelist(StringList& out) {
+        return GetMultiString(IOCTL_HIDHIDE_GET_WHITELIST, out);
     }
 
 private:
@@ -577,6 +723,7 @@ bool EnableHiding(
     HidHideClient& client,
     const std::vector<std::wstring>& paths,
     const std::vector<std::wstring>& removePaths,
+    const std::vector<std::filesystem::path>& extraWhitelistExecutables,
     std::vector<std::wstring>& hiddenPaths,
     bool& hidingActive,
     std::wstring& statusMessage) {
@@ -590,6 +737,14 @@ bool EnableHiding(
         statusMessage = L"HidHide: SofaControl.exe is not whitelisted (add it in HidHide or retry). Path: ";
         statusMessage += exePath.wstring();
         return false;
+    }
+
+    for (const auto& executablePath : extraWhitelistExecutables) {
+        if (!executablePath.empty() && !client.EnsureExecutableWhitelisted(executablePath)) {
+            statusMessage = L"HidHide: failed to whitelist ";
+            statusMessage += executablePath.wstring();
+            return false;
+        }
     }
 
     const auto pathsToRemove = MergeTrackedAndDiscoveredPaths(hiddenPaths, removePaths);
@@ -624,6 +779,287 @@ bool DisableHiding(
     return !hidingActive;
 }
 
+std::filesystem::path DiagnosticsDirectory() {
+    const auto dir = ProgramDataDir();
+    if (dir.empty()) {
+        return {};
+    }
+
+    std::filesystem::path diagnostics = dir / L"diagnostics";
+    std::error_code ec;
+    std::filesystem::create_directories(diagnostics, ec);
+    return diagnostics;
+}
+
+std::filesystem::path DiagnosticsLogPath() {
+    const auto dir = DiagnosticsDirectory();
+    return dir.empty() ? std::filesystem::path{} : dir / L"hidhide-diagnostics.log";
+}
+
+std::filesystem::path ProbeOutputPath() {
+    const auto dir = DiagnosticsDirectory();
+    return dir.empty() ? std::filesystem::path{} : dir / L"xinput-probe.txt";
+}
+
+std::wstring NowText() {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t buffer[64]{};
+    swprintf_s(
+        buffer,
+        L"%04u-%02u-%02u %02u:%02u:%02u.%03u",
+        now.wYear,
+        now.wMonth,
+        now.wDay,
+        now.wHour,
+        now.wMinute,
+        now.wSecond,
+        now.wMilliseconds);
+    return buffer;
+}
+
+std::wstring JoinLines(const StringList& values) {
+    std::wstring text;
+    for (const auto& value : values) {
+        text += L"  - ";
+        text += value;
+        text += L"\r\n";
+    }
+    if (values.empty()) {
+        text += L"  (none)\r\n";
+    }
+    return text;
+}
+
+StringList XInputStatusLines() {
+    StringList lines;
+    for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
+        XINPUT_STATE state{};
+        const DWORD result = XInputGetState(i, &state);
+        wchar_t line[160]{};
+        swprintf_s(
+            line,
+            L"XInput slot %lu: %s%s",
+            i,
+            result == ERROR_SUCCESS ? L"connected" : L"not connected",
+            result == ERROR_SUCCESS ? L"" : (std::wstring(L" (error ") + std::to_wstring(result) + L")").c_str());
+        lines.emplace_back(line);
+    }
+    return lines;
+}
+
+std::wstring QuotePath(const std::filesystem::path& path) {
+    std::wstring text = L"\"";
+    text += path.wstring();
+    text += L"\"";
+    return text;
+}
+
+bool RunNonWhitelistedXInputProbe(const std::filesystem::path& probePath, std::wstring& report, DWORD& exitCode) {
+    report.clear();
+    exitCode = DWORD(-1);
+    if (probePath.empty()) {
+        report = L"(probe path unavailable)\r\n";
+        return false;
+    }
+
+    const auto outputPath = ProbeOutputPath();
+    if (outputPath.empty()) {
+        report = L"(probe output path unavailable)\r\n";
+        return false;
+    }
+
+    DeleteFileW(outputPath.c_str());
+
+    std::wstring commandLine = QuotePath(probePath) + L" " + QuotePath(outputPath);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(
+            nullptr,
+            commandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &startup,
+            &process)) {
+        report = L"(failed to launch probe, error " + std::to_wstring(GetLastError()) + L")\r\n";
+        return false;
+    }
+
+    const DWORD wait = WaitForSingleObject(process.hProcess, 5000);
+    if (wait == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, 124);
+    }
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+
+    HANDLE file = CreateFileW(outputPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        report = L"(probe produced no output, exit " + std::to_wstring(exitCode) + L")\r\n";
+        return true;
+    }
+
+    const DWORD size = GetFileSize(file, nullptr);
+    std::string bytes(size, '\0');
+    DWORD read = 0;
+    if (size > 0) {
+        ReadFile(file, bytes.data(), size, &read, nullptr);
+    }
+    CloseHandle(file);
+    bytes.resize(read);
+
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), static_cast<int>(bytes.size()), nullptr, 0);
+    if (needed > 0) {
+        report.resize(static_cast<size_t>(needed));
+        MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), static_cast<int>(bytes.size()), report.data(), needed);
+    }
+    if (report.empty()) {
+        report = L"(empty probe output, exit " + std::to_wstring(exitCode) + L")\r\n";
+    }
+    return true;
+}
+
+bool AnyXInputControllerConnected() {
+    for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
+        XINPUT_STATE state{};
+        if (XInputGetState(i, &state) == ERROR_SUCCESS) {
+            return true;
+        }
+    }
+    return false;
+}
+
+StringList CandidatePresentDeviceIds() {
+    std::set<std::wstring> candidates;
+    const StringList presentIds = EnumeratePresentDeviceInstanceIds();
+
+    for (const auto& id : presentIds) {
+        const bool isMicrosoft = IsMicrosoftControllerInstanceId(id);
+        const bool isXusb = id.rfind(L"XUSB\\", 0) == 0;
+        const bool isUsb = IsMicrosoftUsbInstanceId(id);
+        const bool isXInputIface = id.find(L"IG_") != std::wstring::npos;
+
+        if (isMicrosoft || isXusb || isUsb || isXInputIface) {
+            candidates.insert(id);
+            AddParentInstancePaths(candidates, id);
+        }
+    }
+
+    return StringList(candidates.begin(), candidates.end());
+}
+
+std::wstring BuildDiagnosticsSnapshot(const std::wstring& reason, const std::filesystem::path& nonWhitelistedXInputProbe) {
+    HidHideClient client;
+    bool driverOpen = client.Open();
+    bool hidhideActive = false;
+    StringList blacklist;
+    StringList whitelist;
+    DWORD hidhideError = ERROR_SUCCESS;
+
+    if (driverOpen) {
+        if (!client.GetActive(hidhideActive)) {
+            hidhideError = client.LastError();
+        }
+        if (!client.GetBlacklist(blacklist)) {
+            hidhideError = client.LastError();
+        }
+        if (!client.GetWhitelist(whitelist)) {
+            hidhideError = client.LastError();
+        }
+    } else {
+        hidhideError = client.LastError();
+    }
+
+    const StringList remembered = LoadRememberedControllerPaths();
+    const StringList candidates = CandidatePresentDeviceIds();
+    const auto selectedSet = CollectControllerInstancePaths();
+    const StringList selected(selectedSet.begin(), selectedSet.end());
+    const bool bootGuardEnabled = BootGuardEnabled();
+    const StringList xinput = XInputStatusLines();
+    std::wstring probeReport;
+    DWORD probeExitCode = DWORD(-1);
+    const bool probeRan = RunNonWhitelistedXInputProbe(nonWhitelistedXInputProbe, probeReport, probeExitCode);
+    const bool nonWhitelistedProcessSeesXInput = probeRan && probeExitCode == 2;
+
+    std::wstring text;
+    text += L"==== SofaControl HidHide diagnostics ";
+    text += NowText();
+    text += L" ====\r\n";
+    text += L"Reason: ";
+    text += reason.empty() ? L"(none)" : reason;
+    text += L"\r\n";
+    text += L"BootGuardEnabled: ";
+    text += bootGuardEnabled ? L"true" : L"false";
+    text += L"\r\n";
+    text += L"HidHide control device: ";
+    text += driverOpen ? L"open" : L"not open";
+    text += L"\r\n";
+    text += L"HidHide active: ";
+    text += hidhideActive ? L"true" : L"false";
+    text += L"\r\n";
+    text += L"HidHide last error: ";
+    text += std::to_wstring(hidhideError);
+    text += L"\r\n\r\n";
+
+    if (!bootGuardEnabled) {
+        text += L"Boot guard is disabled: the service is observing only and will not force early hiding before SofaControl chooses a protected mode.\r\n\r\n";
+    }
+
+    if (hidhideActive && nonWhitelistedProcessSeesXInput) {
+        text += L"WARNING: HidHide is active, but a non-whitelisted XInput probe still reports a connected controller.\r\n";
+        text += L"This means normal Windows apps may still be able to see the original controller.\r\n\r\n";
+    } else if (hidhideActive && probeRan && probeExitCode == 0) {
+        text += L"Non-whitelisted XInput probe could not see the controller while HidHide was active.\r\n\r\n";
+    }
+
+    text += L"Whitelisted process XInput state:\r\n";
+    text += JoinLines(xinput);
+    text += L"\r\nNon-whitelisted XInput probe:\r\n";
+    text += L"  Probe ran: ";
+    text += probeRan ? L"true" : L"false";
+    text += L"\r\n  Exit code: ";
+    text += std::to_wstring(probeExitCode);
+    text += L"\r\n";
+    if (probeReport.empty()) {
+        text += L"  (empty)\r\n";
+    } else {
+        size_t start = 0;
+        while (start < probeReport.size()) {
+            size_t end = probeReport.find(L"\r\n", start);
+            if (end == std::wstring::npos) {
+                end = probeReport.size();
+            }
+            const std::wstring line = probeReport.substr(start, end - start);
+            if (!line.empty()) {
+                text += L"  - ";
+                text += line;
+                text += L"\r\n";
+            }
+            start = end + 2;
+        }
+    }
+    text += L"\r\nRemembered controller paths:\r\n";
+    text += JoinLines(remembered);
+    text += L"\r\nPresent Xbox/controller-like device IDs and parents:\r\n";
+    text += JoinLines(candidates);
+    text += L"\r\nCurrent selected controller group paths:\r\n";
+    text += JoinLines(selected);
+    text += L"\r\nHidHide blacklist:\r\n";
+    text += JoinLines(blacklist);
+    text += L"\r\nHidHide whitelist:\r\n";
+    text += JoinLines(whitelist);
+    text += L"\r\n";
+    return text;
+}
+
 }  // namespace
 
 static bool OpenClient(HidHideClient& client, std::wstring& statusMessage) {
@@ -653,24 +1089,39 @@ std::vector<std::wstring> DeviceHider::FindConnectedControllerPaths() {
     pathsToForget_.clear();
 
     const StringList remembered = LoadRememberedControllerPaths();
-    if (!PrimaryXInputControllerConnected()) {
-        return remembered;
+    const auto receiverSet = CollectXboxWirelessReceiverPaths();
+    StringList receivers(receiverSet.begin(), receiverSet.end());
+    const StringList rememberedReceivers = FilterXboxWirelessReceiverPaths(remembered);
+    if (!receivers.empty()) {
+        if (RememberControllerPathsEnabled()) {
+            SaveRememberedControllerPaths(receivers);
+        }
+        hiddenPaths_.clear();
+        return receivers;
+    }
+    if (!rememberedReceivers.empty()) {
+        return rememberedReceivers;
     }
 
-    if (RememberControllerPathsEnabled() && !remembered.empty() && AreAnyPathsPresent(remembered)) {
+    if (!PrimaryXInputControllerConnected()) {
         return remembered;
     }
 
     const auto discoveredSet = CollectControllerInstancePaths();
     StringList discovered(discoveredSet.begin(), discoveredSet.end());
-    if (RememberControllerPathsEnabled() && !discovered.empty()) {
-        SaveRememberedControllerPaths(discovered);
+    if (!discovered.empty()) {
+        std::set<std::wstring> merged(remembered.begin(), remembered.end());
+        merged.insert(discovered.begin(), discovered.end());
+        StringList mergedPaths(merged.begin(), merged.end());
+        if (RememberControllerPathsEnabled()) {
+            SaveRememberedControllerPaths(mergedPaths);
+        }
+        hiddenPaths_.clear();
+        return mergedPaths;
     }
 
-    if (!discovered.empty()) {
-        pathsToForget_ = remembered;
-        hiddenPaths_.clear();
-        return discovered;
+    if (RememberControllerPathsEnabled() && !remembered.empty() && AreAnyPathsPresent(remembered)) {
+        return remembered;
     }
 
     return remembered;
@@ -687,7 +1138,7 @@ bool DeviceHider::ApplyHide() {
         return false;
     }
 
-    return EnableHiding(client, FindConnectedControllerPaths(), pathsToForget_, hiddenPaths_, hidingActive_, statusMessage_);
+    return EnableHiding(client, FindConnectedControllerPaths(), pathsToForget_, {}, hiddenPaths_, hidingActive_, statusMessage_);
 }
 
 bool DeviceHider::ApplyReveal() {
@@ -714,6 +1165,88 @@ bool DeviceHider::Reveal() {
 
 bool DeviceHider::RefreshHidden() {
     return ApplyHide();
+}
+
+bool DeviceHider::ProtectKnownControllers(const std::vector<std::filesystem::path>& extraWhitelistExecutables) {
+    if (!IsDriverAvailable()) {
+        statusMessage_ = L"HidHide driver not installed. Get it at github.com/nefarius/HidHide/releases";
+        return false;
+    }
+
+    HidHideClient client;
+    if (!OpenClient(client, statusMessage_)) {
+        return false;
+    }
+
+    return EnableHiding(
+        client,
+        FindConnectedControllerPaths(),
+        pathsToForget_,
+        extraWhitelistExecutables,
+        hiddenPaths_,
+        hidingActive_,
+        statusMessage_);
+}
+
+bool DeviceHider::IsBootGuardEnabled() {
+    return BootGuardEnabled();
+}
+
+void DeviceHider::SetBootGuardEnabled(bool enabled) {
+    WriteBootGuardEnabled(enabled);
+}
+
+std::wstring DeviceHider::DiagnosticsSignature() {
+    std::wstring signature;
+    signature += BootGuardEnabled() ? L"guard=1;" : L"guard=0;";
+
+    HidHideClient client;
+    if (client.Open()) {
+        bool active = false;
+        client.GetActive(active);
+        signature += active ? L"hidhide=1;" : L"hidhide=0;";
+
+        StringList blacklist;
+        if (client.GetBlacklist(blacklist)) {
+            signature += L"blacklist=" + std::to_wstring(blacklist.size()) + L";";
+        }
+    } else {
+        signature += L"hidhide=open-failed-" + std::to_wstring(client.LastError()) + L";";
+    }
+
+    for (const auto& line : XInputStatusLines()) {
+        signature += line;
+        signature += L";";
+    }
+    for (const auto& id : CandidatePresentDeviceIds()) {
+        signature += id;
+        signature += L";";
+    }
+    return signature;
+}
+
+void DeviceHider::WriteDiagnosticsSnapshot(
+    const std::wstring& reason,
+    const std::filesystem::path& nonWhitelistedXInputProbe) {
+    const auto path = DiagnosticsLogPath();
+    if (path.empty()) {
+        return;
+    }
+
+    const std::wstring snapshot = BuildDiagnosticsSnapshot(reason, nonWhitelistedXInputProbe);
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    if (!output) {
+        return;
+    }
+
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, snapshot.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (needed <= 1) {
+        return;
+    }
+
+    std::string utf8(static_cast<size_t>(needed - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, snapshot.c_str(), -1, utf8.data(), needed, nullptr, nullptr);
+    output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
 }
 
 void DeviceHider::RestoreOnExit() {

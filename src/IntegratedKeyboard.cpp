@@ -154,47 +154,62 @@ int IntegratedKeyboard::FindNearestColInRow(int row, int preferredCol) const {
 }
 
 void IntegratedKeyboard::EnsureSelectionValid() {
-    if (IsValidCell(selectedRow_, selectedCol_)) {
-        return;
-    }
+    auto ensure = [this](NavigationFinger finger) {
+        if (IsValidCell(SelectedRow(finger), SelectedCol(finger))) {
+            return;
+        }
 
-    for (int row = 0; row < kGridRows; ++row) {
-        for (int col = 0; col < kGridCols; ++col) {
-            if (IsValidCell(row, col)) {
-                selectedRow_ = row;
-                selectedCol_ = col;
-                return;
+        for (int row = 0; row < kGridRows; ++row) {
+            for (int col = 0; col < kGridCols; ++col) {
+                if (IsValidCell(row, col)) {
+                    SetSelection(row, col, finger);
+                    return;
+                }
             }
         }
-    }
+    };
+
+    ensure(NavigationFinger::LeftStick);
+    ensure(NavigationFinger::RightStick);
 }
 
-void IntegratedKeyboard::SetSelection(int row, int col) {
+int IntegratedKeyboard::SelectedRow(NavigationFinger finger) const {
+    return finger == NavigationFinger::RightStick ? rightSelectedRow_ : leftSelectedRow_;
+}
+
+int IntegratedKeyboard::SelectedCol(NavigationFinger finger) const {
+    return finger == NavigationFinger::RightStick ? rightSelectedCol_ : leftSelectedCol_;
+}
+
+void IntegratedKeyboard::SetSelection(int row, int col, NavigationFinger finger) {
     if (!IsValidCell(row, col)) {
         return;
     }
 
-    if (row == selectedRow_ && col == selectedCol_) {
+    const int currentRow = SelectedRow(finger);
+    const int currentCol = SelectedCol(finger);
+    if (row == currentRow && col == currentCol) {
         return;
     }
 
-    const RECT previousCell = CellRect(selectedRow_, selectedCol_);
-    selectedRow_ = row;
-    selectedCol_ = col;
-    const RECT nextCell = CellRect(selectedRow_, selectedCol_);
+    if (finger == NavigationFinger::RightStick) {
+        rightSelectedRow_ = row;
+        rightSelectedCol_ = col;
+    } else {
+        leftSelectedRow_ = row;
+        leftSelectedCol_ = col;
+    }
 
-    RECT updateRect{};
-    UnionRect(&updateRect, &previousCell, &nextCell);
-    InvalidateRect(hwnd_, &updateRect, FALSE);
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-bool IntegratedKeyboard::MoveHorizontal(int deltaCol) {
+bool IntegratedKeyboard::MoveHorizontal(int deltaCol, NavigationFinger finger) {
     if (deltaCol == 0) {
         return false;
     }
 
-    const int row = selectedRow_;
-    int col = selectedCol_;
+    const int row = SelectedRow(finger);
+    int col = SelectedCol(finger);
 
     for (int attempt = 0; attempt < kGridCols; ++attempt) {
         col += deltaCol;
@@ -205,7 +220,7 @@ bool IntegratedKeyboard::MoveHorizontal(int deltaCol) {
         }
 
         if (IsValidCell(row, col)) {
-            SetSelection(row, col);
+            SetSelection(row, col, finger);
             return true;
         }
     }
@@ -213,28 +228,33 @@ bool IntegratedKeyboard::MoveHorizontal(int deltaCol) {
     return false;
 }
 
-bool IntegratedKeyboard::MoveVertical(int deltaRow) {
+bool IntegratedKeyboard::MoveVertical(int deltaRow, NavigationFinger finger) {
     if (deltaRow == 0) {
         return false;
     }
 
-    const int targetRow = WrapRow(selectedRow_ + deltaRow, kGridRows);
-    const int targetCol = FindNearestColInRow(targetRow, selectedCol_);
+    const int currentRow = SelectedRow(finger);
+    const int currentCol = SelectedCol(finger);
+    const int targetRow = WrapRow(currentRow + deltaRow, kGridRows);
+    const int targetCol = FindNearestColInRow(targetRow, currentCol);
     if (targetCol < 0) {
         return false;
     }
 
-    if (targetRow == selectedRow_ && targetCol == selectedCol_) {
+    if (targetRow == currentRow && targetCol == currentCol) {
         return false;
     }
 
-    SetSelection(targetRow, targetCol);
+    SetSelection(targetRow, targetCol, finger);
     return true;
 }
 
-void IntegratedKeyboard::HandleStickNavigation(float stickX, float stickY) {
+void IntegratedKeyboard::HandleSingleStickNavigation(float stickX, float stickY, NavigationFinger finger) {
     int dirX = 0;
     int dirY = 0;
+    int& storedDirX = finger == NavigationFinger::RightStick ? rightStickDirX_ : stickDirX_;
+    int& storedDirY = finger == NavigationFinger::RightStick ? rightStickDirY_ : stickDirY_;
+    UINT& repeatCooldown = finger == NavigationFinger::RightStick ? rightStickRepeatCooldown_ : stickRepeatCooldown_;
 
     if (stickX > kStickNavThreshold) {
         dirX = 1;
@@ -249,9 +269,9 @@ void IntegratedKeyboard::HandleStickNavigation(float stickX, float stickY) {
     }
 
     if (dirX == 0 && dirY == 0) {
-        stickDirX_ = 0;
-        stickDirY_ = 0;
-        stickRepeatCooldown_ = 0;
+        storedDirX = 0;
+        storedDirY = 0;
+        repeatCooldown = 0;
         return;
     }
 
@@ -265,45 +285,65 @@ void IntegratedKeyboard::HandleStickNavigation(float stickX, float stickY) {
         moveY = dirY;
     }
 
-    const bool directionChanged = moveX != stickDirX_ || moveY != stickDirY_;
-    if (!directionChanged && stickRepeatCooldown_ > 0) {
-        --stickRepeatCooldown_;
+    const bool directionChanged = moveX != storedDirX || moveY != storedDirY;
+    if (!directionChanged && repeatCooldown > 0) {
+        --repeatCooldown;
         return;
     }
 
     bool moved = false;
     if (moveX != 0) {
-        moved = MoveHorizontal(moveX);
+        moved = MoveHorizontal(moveX, finger);
     } else if (moveY != 0) {
-        moved = MoveVertical(moveY);
+        moved = MoveVertical(moveY, finger);
     }
 
     if (moved) {
-        stickDirX_ = moveX;
-        stickDirY_ = moveY;
-        stickRepeatCooldown_ = directionChanged ? 1 : kStickRepeatFrames;
+        storedDirX = moveX;
+        storedDirY = moveY;
+        repeatCooldown = kStickRepeatFrames;
     }
+}
+
+void IntegratedKeyboard::HandleStickNavigation(float leftStickX, float leftStickY, float rightStickX, float rightStickY) {
+    const bool leftActive = (leftStickX > kStickNavThreshold || leftStickX < -kStickNavThreshold ||
+                             leftStickY > kStickNavThreshold || leftStickY < -kStickNavThreshold);
+    const bool rightActive = (rightStickX > kStickNavThreshold || rightStickX < -kStickNavThreshold ||
+                              rightStickY > kStickNavThreshold || rightStickY < -kStickNavThreshold);
+
+    if (leftActive && !leftStickWasActive_) {
+        activeFinger_ = NavigationFinger::LeftStick;
+    }
+    if (rightActive && !rightStickWasActive_) {
+        activeFinger_ = NavigationFinger::RightStick;
+    }
+
+    leftStickWasActive_ = leftActive;
+    rightStickWasActive_ = rightActive;
+
+    HandleSingleStickNavigation(leftStickX, leftStickY, NavigationFinger::LeftStick);
+    HandleSingleStickNavigation(rightStickX, rightStickY, NavigationFinger::RightStick);
 }
 
 void IntegratedKeyboard::HandleNavigation(const ControllerKeyboardInput& input) {
     if (input.navUp) {
-        MoveVertical(-1);
+        MoveVertical(-1, activeFinger_);
         return;
     }
     if (input.navDown) {
-        MoveVertical(1);
+        MoveVertical(1, activeFinger_);
         return;
     }
     if (input.navLeft) {
-        MoveHorizontal(-1);
+        MoveHorizontal(-1, activeFinger_);
         return;
     }
     if (input.navRight) {
-        MoveHorizontal(1);
+        MoveHorizontal(1, activeFinger_);
         return;
     }
 
-    HandleStickNavigation(input.stickX, input.stickY);
+    HandleStickNavigation(input.stickX, input.stickY, input.rightStickX, input.rightStickY);
 }
 
 void IntegratedKeyboard::RestoreTypingFocus() {
@@ -313,11 +353,13 @@ void IntegratedKeyboard::RestoreTypingFocus() {
 }
 
 void IntegratedKeyboard::ActivateSelectedKey() {
-    if (!IsValidCell(selectedRow_, selectedCol_)) {
+    const int selectedRow = SelectedRow(activeFinger_);
+    const int selectedCol = SelectedCol(activeFinger_);
+    if (!IsValidCell(selectedRow, selectedCol)) {
         return;
     }
 
-    const KeyCell& key = grid_[static_cast<size_t>(selectedRow_)][static_cast<size_t>(selectedCol_)];
+    const KeyCell& key = grid_[static_cast<size_t>(selectedRow)][static_cast<size_t>(selectedCol)];
 
     RestoreTypingFocus();
 
@@ -416,12 +458,20 @@ void IntegratedKeyboard::ShowBelowRect(const RECT& anchorRect, int gapPixels) {
 }
 
 void IntegratedKeyboard::ResetOpenState() {
-    selectedRow_ = 1;
-    selectedCol_ = 0;
+    leftSelectedRow_ = 1;
+    leftSelectedCol_ = 0;
+    rightSelectedRow_ = 1;
+    rightSelectedCol_ = 5;
+    activeFinger_ = NavigationFinger::LeftStick;
     shiftActive_ = false;
     stickDirX_ = 0;
     stickDirY_ = 0;
     stickRepeatCooldown_ = 0;
+    rightStickDirX_ = 0;
+    rightStickDirY_ = 0;
+    rightStickRepeatCooldown_ = 0;
+    leftStickWasActive_ = false;
+    rightStickWasActive_ = false;
     EnsureSelectionValid();
 }
 
@@ -480,6 +530,12 @@ void IntegratedKeyboard::Close() {
     stickDirX_ = 0;
     stickDirY_ = 0;
     stickRepeatCooldown_ = 0;
+    rightStickDirX_ = 0;
+    rightStickDirY_ = 0;
+    rightStickRepeatCooldown_ = 0;
+    leftStickWasActive_ = false;
+    rightStickWasActive_ = false;
+    activeFinger_ = NavigationFinger::LeftStick;
     statusMessage_ = L"Keyboard: closed";
 
     RestoreTypingFocus();
@@ -583,19 +639,46 @@ void IntegratedKeyboard::Paint(HDC hdc) const {
                 continue;
             }
 
-            const bool selected = row == selectedRow_ && col == selectedCol_;
+            const bool selectedByLeft = row == leftSelectedRow_ && col == leftSelectedCol_;
+            const bool selectedByRight = row == rightSelectedRow_ && col == rightSelectedCol_;
+            const bool selected = selectedByLeft || selectedByRight;
+            const bool activeSelected =
+                (activeFinger_ == NavigationFinger::LeftStick && selectedByLeft) ||
+                (activeFinger_ == NavigationFinger::RightStick && selectedByRight);
             const bool shiftKey = key.kind == KeyKind::Shift && shiftActive_;
 
             RECT cell = CellRect(row, col);
-            const COLORREF fillColor = selected ? RGB(0, 130, 220) : (shiftKey ? RGB(90, 70, 20) : RGB(58, 58, 64));
+            COLORREF fillColor = shiftKey ? RGB(90, 70, 20) : RGB(58, 58, 64);
+            COLORREF borderColor = RGB(90, 90, 98);
+            if (selectedByLeft && selectedByRight) {
+                fillColor = activeSelected ? RGB(196, 104, 24) : RGB(128, 88, 70);
+                borderColor = RGB(255, 202, 120);
+            } else if (selectedByRight) {
+                fillColor = activeSelected ? RGB(214, 112, 18) : RGB(150, 82, 24);
+                borderColor = activeSelected ? RGB(255, 194, 92) : RGB(220, 144, 62);
+            } else if (selectedByLeft) {
+                fillColor = activeSelected ? RGB(0, 130, 220) : RGB(36, 92, 146);
+                borderColor = activeSelected ? RGB(120, 200, 255) : RGB(74, 148, 210);
+            }
 
             HBRUSH brush = CreateSolidBrush(fillColor);
-            HPEN pen = CreatePen(PS_SOLID, 1, selected ? RGB(120, 200, 255) : RGB(90, 90, 98));
+            HPEN pen = CreatePen(PS_SOLID, selected ? 2 : 1, borderColor);
             HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, brush));
             HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
 
             RoundRect(hdc, cell.left, cell.top, cell.right, cell.bottom, 8, 8);
             PaintKeyLabel(hdc, key, cell, selected);
+
+            if (selectedByLeft && selectedByRight) {
+                HBRUSH leftDot = CreateSolidBrush(RGB(120, 200, 255));
+                HBRUSH rightDot = CreateSolidBrush(RGB(255, 174, 66));
+                RECT leftRect{cell.left + 7, cell.top + 7, cell.left + 15, cell.top + 15};
+                RECT rightRect{cell.left + 18, cell.top + 7, cell.left + 26, cell.top + 15};
+                FillRect(hdc, &leftRect, leftDot);
+                FillRect(hdc, &rightRect, rightDot);
+                DeleteObject(leftDot);
+                DeleteObject(rightDot);
+            }
 
             SelectObject(hdc, oldBrush);
             SelectObject(hdc, oldPen);

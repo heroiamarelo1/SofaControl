@@ -44,13 +44,14 @@ void AppConfig::Load() {
                                   : SelectAction::None;
 
     wakeEnabled_ = GetPrivateProfileIntW(kSection, L"WakeEnabled", 0, path.c_str()) != 0;
-    startupEnabled_ = GetPrivateProfileIntW(kSection, L"StartupEnabled", 0, path.c_str()) != 0;
+    startupEnabled_ = GetPrivateProfileIntW(kSection, L"StartupEnabled", 1, path.c_str()) != 0;
 
-    backend_ = (GetPrivateProfileIntW(kSection, L"Backend", 0, path.c_str()) == 1)
-                   ? ControllerBackend::Emulated360
-                   : ControllerBackend::Native;
-    preArmEnabled_ = GetPrivateProfileIntW(kSection, L"PreArmEnabled", 1, path.c_str()) != 0;
+    const int backend = static_cast<int>(GetPrivateProfileIntW(kSection, L"Backend", 0, path.c_str()));
+    backend_ = (backend == 1) ? ControllerBackend::Emulated360
+                              : ControllerBackend::Native;
+    preArmEnabled_ = GetPrivateProfileIntW(kSection, L"PreArmEnabled", 0, path.c_str()) != 0;
     combosEnabled_ = GetPrivateProfileIntW(kSection, L"CombosEnabled", 1, path.c_str()) != 0;
+    showOnNextLaunch_ = GetPrivateProfileIntW(kSection, L"ShowOnNextLaunch", 0, path.c_str()) != 0;
 
     wchar_t firstRun[32]{};
     GetPrivateProfileStringW(kSection, L"FirstRunUnix", L"0", firstRun, 32, path.c_str());
@@ -77,6 +78,7 @@ void AppConfig::Save() const {
     writeInt(L"Backend", static_cast<int>(backend_));
     writeInt(L"PreArmEnabled", preArmEnabled_ ? 1 : 0);
     writeInt(L"CombosEnabled", combosEnabled_ ? 1 : 0);
+    writeInt(L"ShowOnNextLaunch", showOnNextLaunch_ ? 1 : 0);
     writeInt(L"DonateStage", donateStage_);
 
     wchar_t firstRun[32]{};

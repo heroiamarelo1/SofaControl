@@ -1,6 +1,6 @@
 #pragma once
 
-// Virtual-mouse shortcuts: LT Alt+Tab, LB/RB browser back/forward, RB+stick zoom.
+// Virtual-mouse shortcuts: LT Alt+Tab, LB/RB browser back/forward, RB media controls.
 
 #include <Windows.h>
 
@@ -19,6 +19,9 @@ public:
 
     // RB + right stick zoom, plain right-stick scroll, LB/RB tap shortcuts.
     void UpdateShouldersAndZoom(const XboxController& controller);
+
+    // RB + face buttons / d-pad media controls. Returns true when input was consumed.
+    bool UpdateMediaControls(const XboxController& controller);
 
 private:
     static constexpr DWORD kLtAltTabHoldMs = 1000;
@@ -39,7 +42,7 @@ private:
     bool lbWasDown_ = false;
     bool lbShowDesktopTriggeredThisHold_ = false;
     bool rbWasDown_ = false;
-    bool rbStickUsedThisHold_ = false;
+    bool rbActionUsedThisHold_ = false;
     UINT wheelCooldown_ = 0;
 
     bool CanStartLtAltTab(const XboxController& controller) const;

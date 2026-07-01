@@ -11,8 +11,8 @@ enum class SelectAction {
 };
 
 enum class ControllerBackend {
-    Native = 0,      // Default: real controller revealed via HidHide in game mode
-    Emulated360 = 1, // Real controller hidden; ViGEm virtual Xbox 360 mirrors it
+    Native = 0,       // Real controller revealed via HidHide in game mode
+    Emulated360 = 1,  // Real controller hidden; ViGEm virtual Xbox 360 mirrors it
 };
 
 class AppConfig {
@@ -44,6 +44,9 @@ public:
     bool CombosEnabled() const { return combosEnabled_; }
     void SetCombosEnabled(bool value) { combosEnabled_ = value; }
 
+    bool ShowOnNextLaunch() const { return showOnNextLaunch_; }
+    void SetShowOnNextLaunch(bool value) { showOnNextLaunch_ = value; }
+
     // Donation reminder bookkeeping.
     long long FirstRunUnix() const { return firstRunUnix_; }
     void SetFirstRunUnix(long long value) { firstRunUnix_ = value; }
@@ -59,10 +62,11 @@ private:
     int sensitivityPercent_ = 100;
     SelectAction selectAction_ = SelectAction::None;
     bool wakeEnabled_ = false;
-    bool startupEnabled_ = false;
+    bool startupEnabled_ = true;
     ControllerBackend backend_ = ControllerBackend::Native;
-    bool preArmEnabled_ = true;
+    bool preArmEnabled_ = false;
     bool combosEnabled_ = true;
+    bool showOnNextLaunch_ = false;
     long long firstRunUnix_ = 0;
     int donateStage_ = 0;
 };

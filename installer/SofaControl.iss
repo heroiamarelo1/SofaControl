@@ -7,6 +7,7 @@
 #define MyAppPublisher "HeroiAmarelo"
 #define MyAppURL "https://www.paypal.com/paypalme/heroiamarelo"
 #define MyAppExeName "SofaControl.exe"
+#define MyGuardExeName "SofaControlGuard.exe"
 
 #define ViGEmExe "ViGEmBus_1.22.0_x64_x86_arm64.exe"
 #define HidHideExe "HidHide_1.5.230_x64.exe"
@@ -38,11 +39,11 @@ InfoBeforeFile=about.txt
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "startup"; Description: "Turn on when Windows starts (recommended for a living-room PC)"; GroupDescription: "Startup:"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
 
 [Files]
 Source: "..\build\Release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\Release\{#MyGuardExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\build\Release\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -51,6 +52,7 @@ Source: "redist\{#ViGEmExe}"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "redist\{#HidHideExe}"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "command_list_installer.bmp"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "mark_shortcuts_admin.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "register_startup_task.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -100,23 +102,91 @@ begin
     ResultCode);
 end;
 
+procedure DeleteGuardService();
+var
+  ResultCode: Integer;
+begin
+  Exec(
+    ExpandConstant('{sys}\sc.exe'),
+    'stop SofaControlGuard',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+
+  Exec(
+    ExpandConstant('{sys}\sc.exe'),
+    'delete SofaControlGuard',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+end;
+
+procedure CreateGuardService();
+var
+  ResultCode: Integer;
+  Params: string;
+begin
+  DeleteGuardService();
+
+  Params :=
+    'create SofaControlGuard binPath= ' +
+    Quote(ExpandConstant('{app}\{#MyGuardExeName}')) +
+    ' start= auto depend= HidHide DisplayName= "SofaControl HidHide Guard"';
+
+  Exec(
+    ExpandConstant('{sys}\sc.exe'),
+    Params,
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+
+  Exec(
+    ExpandConstant('{sys}\sc.exe'),
+    'description SofaControlGuard "Applies remembered HidHide controller protection before the user session starts."',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+
+  Exec(
+    ExpandConstant('{sys}\sc.exe'),
+    'start SofaControlGuard',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+end;
+
 procedure CreateStartupTask();
 var
   ResultCode: Integer;
   Params: string;
 begin
   Params :=
-    '/Create /TN "SofaControl" /SC ONLOGON /RL HIGHEST /TR ' +
-    Quote(ExpandConstant('{app}\{#MyAppExeName}')) +
-    ' /F';
+    '-NoProfile -ExecutionPolicy Bypass -File ' +
+    Quote(ExpandConstant('{tmp}\register_startup_task.ps1')) +
+    ' ' +
+    Quote(ExpandConstant('{app}\{#MyAppExeName}'));
 
   Exec(
-    ExpandConstant('{sys}\schtasks.exe'),
+    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     Params,
     '',
     SW_HIDE,
     ewWaitUntilTerminated,
     ResultCode);
+end;
+
+procedure MarkShowOnNextLaunch();
+var
+  ConfigDir: string;
+begin
+  ConfigDir := ExpandConstant('{userappdata}\SofaControl');
+  ForceDirectories(ConfigDir);
+  SetIniString('SofaControl', 'ShowOnNextLaunch', '1', ConfigDir + '\config.ini');
 end;
 
 function ServiceInstalled(const Name: string): Boolean;
@@ -171,12 +241,11 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
+    CreateGuardService();
     DeleteLegacyStartupRegistry();
     DeleteStartupTask();
-    if WizardIsTaskSelected('startup') then
-    begin
-      CreateStartupTask();
-    end;
+    CreateStartupTask();
+    MarkShowOnNextLaunch();
   end;
 end;
 
@@ -184,6 +253,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
+    DeleteGuardService();
     DeleteStartupTask();
     DeleteLegacyStartupRegistry();
   end;

@@ -18,7 +18,7 @@ void ControllerShortcuts::Reset() {
     lbWasDown_ = false;
     lbShowDesktopTriggeredThisHold_ = false;
     rbWasDown_ = false;
-    rbStickUsedThisHold_ = false;
+    rbActionUsedThisHold_ = false;
     wheelCooldown_ = 0;
     keyboardInput_.ReleaseAllModifiers();
     if (altTabSwitcher_.IsActive()) {
@@ -90,7 +90,7 @@ void ControllerShortcuts::UpdateRightStickScroll(const XboxController& controlle
 
     const int direction = stickY > 0.0f ? 1 : -1;
     if (rbDown) {
-        rbStickUsedThisHold_ = true;
+        rbActionUsedThisHold_ = true;
         keyboardInput_.CtrlWheelScroll(-direction);
     } else {
         keyboardInput_.WheelScroll(-direction);
@@ -111,7 +111,7 @@ void ControllerShortcuts::UpdateShouldersAndZoom(const XboxController& controlle
 
     if (rbDown && !rbWasDown_) {
         rbWasDown_ = true;
-        rbStickUsedThisHold_ = false;
+        rbActionUsedThisHold_ = false;
     }
 
     UpdateRightStickScroll(controller, rbDown);
@@ -138,15 +138,47 @@ void ControllerShortcuts::UpdateShouldersAndZoom(const XboxController& controlle
     }
 
     if (controller.WasButtonJustReleased(XINPUT_GAMEPAD_RIGHT_SHOULDER)) {
-        if (rbWasDown_ && !rbStickUsedThisHold_) {
+        if (rbWasDown_ && !rbActionUsedThisHold_) {
             keyboardInput_.TapCombo(VK_MENU, VK_RIGHT);
         }
         rbWasDown_ = false;
-        rbStickUsedThisHold_ = false;
+        rbActionUsedThisHold_ = false;
     } else if (!rbDown) {
         rbWasDown_ = false;
         if (!rbDown) {
-            rbStickUsedThisHold_ = false;
+            rbActionUsedThisHold_ = false;
         }
     }
+}
+
+bool ControllerShortcuts::UpdateMediaControls(const XboxController& controller) {
+    if (!controller.IsButtonDown(XINPUT_GAMEPAD_RIGHT_SHOULDER)) {
+        return false;
+    }
+
+    WORD key = 0;
+    if (controller.WasButtonJustPressed(XINPUT_GAMEPAD_DPAD_UP)) {
+        key = VK_VOLUME_UP;
+    } else if (controller.WasButtonJustPressed(XINPUT_GAMEPAD_DPAD_DOWN)) {
+        key = VK_VOLUME_DOWN;
+    } else if (controller.WasButtonJustPressed(XINPUT_GAMEPAD_DPAD_LEFT) ||
+               controller.WasButtonJustPressed(XINPUT_GAMEPAD_X)) {
+        key = VK_MEDIA_PREV_TRACK;
+    } else if (controller.WasButtonJustPressed(XINPUT_GAMEPAD_DPAD_RIGHT) ||
+               controller.WasButtonJustPressed(XINPUT_GAMEPAD_Y)) {
+        key = VK_MEDIA_NEXT_TRACK;
+    } else if (controller.WasButtonJustPressed(XINPUT_GAMEPAD_A)) {
+        key = VK_MEDIA_PLAY_PAUSE;
+    } else if (controller.WasButtonJustPressed(XINPUT_GAMEPAD_B)) {
+        key = VK_VOLUME_MUTE;
+    }
+
+    if (key == 0) {
+        return false;
+    }
+
+    rbWasDown_ = true;
+    rbActionUsedThisHold_ = true;
+    keyboardInput_.TapKey(key);
+    return true;
 }
